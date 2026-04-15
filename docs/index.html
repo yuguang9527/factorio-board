@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Factorio Board - LLM Agent Leaderboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --gold: #f0c000;
+    --silver: #adb5bd;
+    --bronze: #cd7f32;
+    --green: #3fb950;
+    --red: #f85149;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+
+  /* Header */
+  header { text-align: center; margin-bottom: 2.5rem; }
+  header h1 { font-size: 2.2rem; font-weight: 700; margin-bottom: 0.3rem; }
+  header h1 span { color: var(--accent); }
+  header p { color: var(--text-dim); font-size: 1rem; }
+  .badges { margin-top: 0.8rem; display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    display: inline-block; padding: 0.2rem 0.6rem; border-radius: 12px;
+    font-size: 0.75rem; font-weight: 600; border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+
+  /* Stats bar */
+  .stats-bar {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1rem; margin-bottom: 2rem;
+  }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1rem; text-align: center;
+  }
+  .stat-card .value { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+  .stat-card .label { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.2rem; }
+
+  /* Table */
+  .table-wrap {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead { background: rgba(88,166,255,0.08); }
+  th {
+    padding: 0.75rem 1rem; text-align: left; font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
+    border-bottom: 1px solid var(--border); cursor: pointer; user-select: none;
+  }
+  th:hover { color: var(--accent); }
+  th.sorted-asc::after { content: ' \u25B2'; font-size: 0.6rem; }
+  th.sorted-desc::after { content: ' \u25BC'; font-size: 0.6rem; }
+  td {
+    padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+    font-size: 0.9rem; font-variant-numeric: tabular-nums;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: rgba(88,166,255,0.04); }
+  .rank { font-weight: 700; width: 3rem; text-align: center; }
+  .rank-1 { color: var(--gold); }
+  .rank-2 { color: var(--silver); }
+  .rank-3 { color: var(--bronze); }
+  .model-name { font-weight: 600; }
+  .score { font-weight: 700; color: var(--green); }
+  .dim { color: var(--text-dim); }
+  .error-rate { color: var(--red); }
+
+  /* Config panel */
+  .config {
+    margin-bottom: 1.5rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: end;
+  }
+  .config label { display: block; font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.3rem; }
+  .config input, .config select {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 0.5rem 0.8rem; font-size: 0.85rem;
+  }
+  .config button {
+    background: var(--accent); color: #000; border: none; border-radius: 6px;
+    padding: 0.5rem 1.2rem; font-weight: 600; cursor: pointer; font-size: 0.85rem;
+  }
+  .config button:hover { opacity: 0.9; }
+
+  /* Status */
+  .status {
+    text-align: center; padding: 3rem; color: var(--text-dim); font-size: 0.9rem;
+  }
+  .status.error { color: var(--red); }
+
+  /* Footer */
+  footer {
+    text-align: center; margin-top: 2.5rem; padding-top: 1.5rem;
+    border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.8rem;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>Factorio <span>Board</span></h1>
+    <p>LLM Agent Benchmark &mdash; Who builds the best factory?</p>
+    <div class="badges">
+      <span class="badge">Weave Traces</span>
+      <span class="badge">Multi-Model</span>
+      <span class="badge">Real-time</span>
+    </div>
+  </header>
+
+  <div class="config">
+    <div>
+      <label>W&amp;B Entity</label>
+      <input id="entity" type="text" placeholder="wandb" value="">
+    </div>
+    <div>
+      <label>Project</label>
+      <input id="project" type="text" placeholder="factorio-experiments" value="">
+    </div>
+    <div>
+      <label>API Key</label>
+      <input id="apikey" type="password" placeholder="W&B API key">
+    </div>
+    <div>
+      <button onclick="fetchLeaderboard()">Load</button>
+    </div>
+  </div>
+
+  <div class="stats-bar" id="stats-bar" style="display:none;">
+    <div class="stat-card"><div class="value" id="stat-models">0</div><div class="label">Models</div></div>
+    <div class="stat-card"><div class="value" id="stat-runs">0</div><div class="label">Trajectories</div></div>
+    <div class="stat-card"><div class="value" id="stat-best">0</div><div class="label">Best Score</div></div>
+    <div class="stat-card"><div class="value" id="stat-steps">0</div><div class="label">Avg Steps</div></div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="rank">#</th>
+          <th data-col="model">Model</th>
+          <th data-col="runs">Runs</th>
+          <th data-col="best_score">Best Score</th>
+          <th data-col="avg_score">Avg Score</th>
+          <th data-col="avg_steps">Avg Steps</th>
+          <th data-col="avg_tokens">Avg Tokens</th>
+          <th data-col="avg_latency">Avg Latency</th>
+          <th data-col="error_rate">Error Rate</th>
+        </tr>
+      </thead>
+      <tbody id="leaderboard-body">
+        <tr><td colspan="9" class="status">Enter your W&amp;B credentials and click Load</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    Powered by <a href="https://wandb.ai">W&amp;B Weave</a> &middot;
+    <a href="https://github.com/yuguang9527/factorio-board">GitHub</a>
+  </footer>
+</div>
+
+<script>
+const API_BASE = 'https://trace.wandb.ai';
+let leaderboardData = [];
+let currentSort = { col: 'best_score', dir: 'desc' };
+
+// Persist config in localStorage
+function saveConfig() {
+  localStorage.setItem('fb_entity', document.getElementById('entity').value);
+  localStorage.setItem('fb_project', document.getElementById('project').value);
+}
+function loadConfig() {
+  document.getElementById('entity').value = localStorage.getItem('fb_entity') || '';
+  document.getElementById('project').value = localStorage.getItem('fb_project') || '';
+}
+loadConfig();
+
+// Fetch trajectory traces from Weave
+async function fetchLeaderboard() {
+  const entity = document.getElementById('entity').value.trim();
+  const project = document.getElementById('project').value.trim();
+  const apiKey = document.getElementById('apikey').value.trim();
+
+  if (!entity || !project || !apiKey) {
+    showStatus('Please fill in entity, project, and API key', true);
+    return;
+  }
+  saveConfig();
+  showStatus('Loading traces from Weave...');
+
+  try {
+    // Query Weave for trajectory calls
+    const resp = await fetch(`${API_BASE}/calls/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${btoa(':' + apiKey)}`,
+      },
+      body: JSON.stringify({
+        project_id: `${entity}/${project}`,
+        filter: { op_names: ['trajectory'] },
+        limit: 500,
+        sort_by: [{ field: 'started_at', direction: 'desc' }],
+      }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Weave API ${resp.status}: ${text.slice(0, 200)}`);
+    }
+
+    const data = await resp.json();
+    const calls = data.calls || [];
+
+    if (calls.length === 0) {
+      showStatus('No trajectory traces found. Run agent_loop.py first!');
+      return;
+    }
+
+    // Aggregate by model
+    const byModel = {};
+    for (const call of calls) {
+      const model = call.inputs?.model || call.attributes?.model || 'unknown';
+      if (!byModel[model]) {
+        byModel[model] = { runs: [], total_tokens: 0, total_latency: 0, errors: 0, total_steps: 0 };
+      }
+      const m = byModel[model];
+      const score = call.output?.final_score ?? call.output?.production_score ?? 0;
+      const steps = call.output?.total_steps ?? call.inputs?.max_steps ?? 0;
+      m.runs.push(score);
+      m.total_steps += steps;
+
+      // Get child calls for token/latency info
+      // (approximation from trajectory-level data if available)
+    }
+
+    // Build leaderboard rows
+    leaderboardData = Object.entries(byModel).map(([model, m]) => {
+      const scores = m.runs;
+      const best = Math.max(...scores);
+      const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+      return {
+        model,
+        runs: scores.length,
+        best_score: best,
+        avg_score: avg,
+        avg_steps: m.total_steps / scores.length,
+        avg_tokens: 0,  // TODO: aggregate from child llm_call traces
+        avg_latency: 0,
+        error_rate: 0,
+      };
+    });
+
+    // Also try to fetch llm_call data for token/latency stats
+    await enrichWithLLMStats(entity, project, apiKey, calls);
+
+    renderTable();
+    renderStats();
+
+  } catch (e) {
+    showStatus(`Error: ${e.message}`, true);
+  }
+}
+
+async function enrichWithLLMStats(entity, project, apiKey, trajCalls) {
+  try {
+    const resp = await fetch(`${API_BASE}/calls/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${btoa(':' + apiKey)}`,
+      },
+      body: JSON.stringify({
+        project_id: `${entity}/${project}`,
+        filter: { op_names: ['llm_call'] },
+        limit: 5000,
+      }),
+    });
+    if (!resp.ok) return;
+
+    const data = await resp.json();
+    const llmCalls = data.calls || [];
+
+    // Map trace_id -> model (from trajectory calls)
+    const traceToModel = {};
+    for (const t of trajCalls) {
+      if (t.trace_id) {
+        traceToModel[t.trace_id] = t.inputs?.model || 'unknown';
+      }
+    }
+
+    // Aggregate llm_call stats by model
+    const stats = {};
+    for (const c of llmCalls) {
+      const model = traceToModel[c.trace_id] || 'unknown';
+      if (!stats[model]) stats[model] = { tokens: 0, latency: 0, errors: 0, count: 0 };
+      const s = stats[model];
+      s.count++;
+      s.tokens += (c.output?.tokens_in || 0) + (c.output?.tokens_out || 0);
+      s.latency += c.output?.latency_ms || 0;
+    }
+
+    // Merge into leaderboardData
+    for (const row of leaderboardData) {
+      const s = stats[row.model];
+      if (s && s.count > 0) {
+        row.avg_tokens = Math.round(s.tokens / row.runs);
+        row.avg_latency = Math.round(s.latency / s.count);
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to enrich LLM stats:', e);
+  }
+}
+
+function renderTable() {
+  // Sort
+  const { col, dir } = currentSort;
+  leaderboardData.sort((a, b) => {
+    const va = a[col], vb = b[col];
+    if (typeof va === 'string') return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+    return dir === 'asc' ? va - vb : vb - va;
+  });
+
+  const tbody = document.getElementById('leaderboard-body');
+  tbody.innerHTML = leaderboardData.map((row, i) => {
+    const rank = i + 1;
+    const rankClass = rank <= 3 ? ` rank-${rank}` : '';
+    return `<tr>
+      <td class="rank${rankClass}">${rank}</td>
+      <td class="model-name">${esc(row.model)}</td>
+      <td>${row.runs}</td>
+      <td class="score">${fmt(row.best_score)}</td>
+      <td>${fmt(row.avg_score)}</td>
+      <td>${fmt(row.avg_steps, 0)}</td>
+      <td class="dim">${row.avg_tokens ? fmt(row.avg_tokens, 0) : '-'}</td>
+      <td class="dim">${row.avg_latency ? row.avg_latency + 'ms' : '-'}</td>
+      <td class="${row.error_rate > 0.1 ? 'error-rate' : 'dim'}">${(row.error_rate * 100).toFixed(1)}%</td>
+    </tr>`;
+  }).join('');
+
+  // Update sort indicators
+  document.querySelectorAll('th[data-col]').forEach(th => {
+    th.classList.remove('sorted-asc', 'sorted-desc');
+    if (th.dataset.col === col) th.classList.add(dir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+  });
+}
+
+function renderStats() {
+  document.getElementById('stats-bar').style.display = 'grid';
+  document.getElementById('stat-models').textContent = leaderboardData.length;
+  document.getElementById('stat-runs').textContent = leaderboardData.reduce((a, r) => a + r.runs, 0);
+  document.getElementById('stat-best').textContent = fmt(Math.max(...leaderboardData.map(r => r.best_score)));
+  const allSteps = leaderboardData.map(r => r.avg_steps);
+  document.getElementById('stat-steps').textContent = fmt(allSteps.reduce((a, b) => a + b, 0) / allSteps.length, 0);
+}
+
+// Column sort click
+document.querySelectorAll('th[data-col]').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.col;
+    if (currentSort.col === col) {
+      currentSort.dir = currentSort.dir === 'desc' ? 'asc' : 'desc';
+    } else {
+      currentSort = { col, dir: 'desc' };
+    }
+    renderTable();
+  });
+});
+
+function showStatus(msg, isError) {
+  document.getElementById('leaderboard-body').innerHTML =
+    `<tr><td colspan="9" class="status${isError ? ' error' : ''}">${esc(msg)}</td></tr>`;
+}
+
+function fmt(n, decimals = 1) {
+  if (n == null || isNaN(n)) return '-';
+  return Number(n).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>

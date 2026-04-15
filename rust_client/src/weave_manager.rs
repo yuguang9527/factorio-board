@@ -21,6 +21,10 @@ pub struct WeaveManager {
     research_cache: Arc<Mutex<HashMap<String, String>>>,
     client: Arc<Mutex<Option<WeaveClient>>>,
     config: WeaveConfig,
+    /// Active agent trajectory context (for Weave trace hierarchy)
+    agent_trajectory: Arc<Mutex<Option<AgentTrajectoryContext>>>,
+    /// Active agent step call_ids: step_number -> call_id
+    agent_steps: Arc<Mutex<HashMap<u32, String>>>,
 }
 
 /// Context for an active Weave call/trace
@@ -31,6 +35,13 @@ struct CallContext {
     session_id: String,
     start_tick: u64,
     inputs: HashMap<String, String>,
+}
+
+/// Context for an active agent trajectory (for Weave trace hierarchy)
+#[derive(Debug, Clone)]
+struct AgentTrajectoryContext {
+    call_id: String,
+    trace_id: String,
 }
 
 impl WeaveManager {
@@ -66,6 +77,8 @@ impl WeaveManager {
             research_cache: Arc::new(Mutex::new(HashMap::new())),
             client: Arc::new(Mutex::new(None)),
             config,
+            agent_trajectory: Arc::new(Mutex::new(None)),
+            agent_steps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -544,6 +557,273 @@ impl WeaveManager {
 
         let base64_data = BASE64.encode(&bytes);
         Ok(format!("data:image/png;base64,{}", base64_data))
+    }
+
+    // ─── Agent trace methods (FLE benchmark integration) ─────────────
+
+    /// Start a Weave call with explicit trace_id and parent_id (for agent hierarchy)
+    async fn start_traced_call(
+        &self,
+        operation: String,
+        inputs: HashMap<String, serde_json::Value>,
+        trace_id: String,
+        parent_id: Option<String>,
+    ) -> Option<String> {
+        if let Err(e) = self.ensure_client().await {
+            eprintln!("⚠️  Failed to ensure Weave client: {}", e);
+            return None;
+        }
+
+        let session_id = {
+            let guard = self.current_session_id.lock().await;
+            match guard.as_ref() {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("⚠️  Cannot start traced call '{}': no active session", operation);
+                    return None;
+                }
+            }
+        };
+
+        let call_id = Uuid::now_v7().to_string();
+
+        let client_guard = self.client.lock().await;
+        let client = match client_guard.as_ref() {
+            Some(c) => c,
+            None => return None,
+        };
+
+        let mut inputs_with_session = inputs;
+        inputs_with_session.insert("session_id".to_string(), serde_json::json!(&session_id));
+
+        let start = StartedCallSchemaForInsert {
+            project_id: self.config.project_id(),
+            id: Some(call_id.clone()),
+            op_name: operation,
+            display_name: None,
+            trace_id: Some(trace_id),
+            parent_id,
+            thread_id: Some(session_id),
+            turn_id: Some(call_id.clone()),
+            started_at: Utc::now(),
+            attributes: HashMap::new(),
+            inputs: inputs_with_session,
+        };
+
+        if let Err(e) = client.start_call(start).await {
+            eprintln!("⚠️  Failed to send traced start call: {}", e);
+            return None;
+        }
+
+        Some(call_id)
+    }
+
+    /// End a traced call
+    async fn end_traced_call(
+        &self,
+        call_id: &str,
+        outputs: HashMap<String, serde_json::Value>,
+        success: bool,
+    ) {
+        let client_guard = self.client.lock().await;
+        let client = match client_guard.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let end = EndedCallSchemaForInsert {
+            project_id: self.config.project_id(),
+            id: call_id.to_string(),
+            ended_at: Utc::now(),
+            exception: if success { None } else { Some("Error".to_string()) },
+            output: Some(serde_json::to_value(&outputs).unwrap()),
+            summary: HashMap::new(),
+        };
+
+        if let Err(e) = client.end_call(end).await {
+            eprintln!("⚠️  Failed to send traced end call: {}", e);
+        }
+    }
+
+    /// Log an atomic traced call (start + end immediately)
+    async fn log_traced_call(
+        &self,
+        operation: String,
+        inputs: HashMap<String, serde_json::Value>,
+        outputs: HashMap<String, serde_json::Value>,
+        trace_id: String,
+        parent_id: Option<String>,
+    ) {
+        if let Some(call_id) = self
+            .start_traced_call(operation, inputs, trace_id, parent_id)
+            .await
+        {
+            self.end_traced_call(&call_id, outputs, true).await;
+        }
+    }
+
+    /// Dispatch agent events from the pipe
+    pub async fn handle_agent_event(
+        &self,
+        event_name: &str,
+        data: &HashMap<String, serde_json::Value>,
+    ) {
+        match event_name {
+            "trajectory_start" => self.handle_trajectory_start(data).await,
+            "step_start" => self.handle_step_start(data).await,
+            "llm_response" => self.handle_llm_response(data).await,
+            "code_result" => self.handle_code_result(data).await,
+            "trajectory_end" => self.handle_trajectory_end(data).await,
+            _ => eprintln!("⚠️  Unknown agent event: {}", event_name),
+        }
+    }
+
+    async fn handle_trajectory_start(&self, data: &HashMap<String, serde_json::Value>) {
+        let trace_id = Uuid::now_v7().to_string();
+
+        let mut inputs = HashMap::new();
+        for key in ["model", "task", "max_steps"] {
+            if let Some(v) = data.get(key) {
+                inputs.insert(key.to_string(), v.clone());
+            }
+        }
+
+        if let Some(call_id) = self
+            .start_traced_call("trajectory".to_string(), inputs, trace_id.clone(), None)
+            .await
+        {
+            *self.agent_trajectory.lock().await = Some(AgentTrajectoryContext {
+                call_id,
+                trace_id,
+            });
+            self.agent_steps.lock().await.clear();
+            println!("🤖 Trajectory started");
+        }
+    }
+
+    async fn handle_step_start(&self, data: &HashMap<String, serde_json::Value>) {
+        let traj = self.agent_trajectory.lock().await.clone();
+        let Some(traj) = traj else {
+            eprintln!("⚠️  step_start without active trajectory");
+            return;
+        };
+
+        let step = data
+            .get("step")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        let mut inputs = HashMap::new();
+        inputs.insert("step".to_string(), serde_json::json!(step));
+        if let Some(v) = data.get("observation") {
+            inputs.insert("observation".to_string(), v.clone());
+        }
+
+        if let Some(call_id) = self
+            .start_traced_call(
+                format!("step_{}", step),
+                inputs,
+                traj.trace_id,
+                Some(traj.call_id),
+            )
+            .await
+        {
+            self.agent_steps.lock().await.insert(step, call_id);
+            println!("🤖 Step {} started", step);
+        }
+    }
+
+    async fn handle_llm_response(&self, data: &HashMap<String, serde_json::Value>) {
+        let traj = self.agent_trajectory.lock().await.clone();
+        let Some(traj) = traj else { return };
+
+        let step = data
+            .get("step")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let step_call_id = self.agent_steps.lock().await.get(&step).cloned();
+
+        let inputs = HashMap::new(); // observation already in step_start
+
+        let mut outputs = HashMap::new();
+        for key in ["code", "reasoning", "tokens_in", "tokens_out", "latency_ms"] {
+            if let Some(v) = data.get(key) {
+                outputs.insert(key.to_string(), v.clone());
+            }
+        }
+
+        self.log_traced_call(
+            "llm_call".to_string(),
+            inputs,
+            outputs,
+            traj.trace_id,
+            step_call_id,
+        )
+        .await;
+        println!("🤖 LLM response logged for step {}", step);
+    }
+
+    async fn handle_code_result(&self, data: &HashMap<String, serde_json::Value>) {
+        let traj = self.agent_trajectory.lock().await.clone();
+        let Some(traj) = traj else { return };
+
+        let step = data
+            .get("step")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let step_call_id = self.agent_steps.lock().await.get(&step).cloned();
+
+        let mut inputs = HashMap::new();
+        if let Some(v) = data.get("code") {
+            inputs.insert("code".to_string(), v.clone());
+        }
+
+        let mut outputs = HashMap::new();
+        for key in ["output", "error", "reward", "production_score"] {
+            if let Some(v) = data.get(key) {
+                outputs.insert(key.to_string(), v.clone());
+            }
+        }
+
+        // Log the code_exec span
+        self.log_traced_call(
+            "code_exec".to_string(),
+            inputs,
+            outputs.clone(),
+            traj.trace_id.clone(),
+            step_call_id.clone(),
+        )
+        .await;
+
+        // End the parent step span
+        if let Some(step_id) = step_call_id {
+            let has_error = data
+                .get("error")
+                .map(|v| !v.is_null() && v.as_str() != Some(""))
+                .unwrap_or(false);
+            self.end_traced_call(&step_id, outputs, !has_error).await;
+            self.agent_steps.lock().await.remove(&step);
+        }
+        println!("🤖 Code result logged for step {}", step);
+    }
+
+    async fn handle_trajectory_end(&self, data: &HashMap<String, serde_json::Value>) {
+        let traj = self.agent_trajectory.lock().await.take();
+        let Some(traj) = traj else {
+            eprintln!("⚠️  trajectory_end without active trajectory");
+            return;
+        };
+
+        let mut outputs = HashMap::new();
+        for key in ["total_steps", "final_score", "reason"] {
+            if let Some(v) = data.get(key) {
+                outputs.insert(key.to_string(), v.clone());
+            }
+        }
+
+        self.end_traced_call(&traj.call_id, outputs, true).await;
+        self.agent_steps.lock().await.clear();
+        println!("🤖 Trajectory ended");
     }
 
     /// Ends all active calls (used during session transitions)

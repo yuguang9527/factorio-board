@@ -63,6 +63,13 @@ pub enum FactorioEvent {
         #[serde(default)]
         count: Option<u32>,
     },
+    #[serde(rename = "agent")]
+    AgentEvent {
+        event_name: String,
+        session_id: String,
+        #[serde(flatten)]
+        data: HashMap<String, serde_json::Value>,
+    },
 }
 
 /// Event mediator that routes Factorio events to WandB and Weave managers
@@ -275,6 +282,23 @@ impl EventMediator {
                         eprintln!("  [{}] Unknown event type: {}", index, event_name);
                     }
                 }
+            }
+            FactorioEvent::AgentEvent {
+                event_name,
+                session_id,
+                data,
+            } => {
+                println!("  [{}] AgentEvent: {}", index, event_name);
+
+                // Ensure session exists
+                let _run_name = self
+                    .get_or_create_session(session_id, 0, "agent".to_string())
+                    .await;
+
+                // Route to weave manager for trace hierarchy
+                self.weave_manager
+                    .handle_agent_event(&event_name, &data)
+                    .await;
             }
         }
     }

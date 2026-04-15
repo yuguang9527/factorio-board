@@ -21,7 +21,7 @@ build-rust-client: setup-rust-client
 
 # Run the Rust client with W&B tracking
 run-rust-client:
-	cd rust_client && cargo run
+	cd rust_client && WANDB_ENTITY=wandb cargo run
 
 # Run the Rust client with debug logging
 run-rust-client-debug:

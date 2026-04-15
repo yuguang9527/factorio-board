@@ -14,7 +14,7 @@ local session_regenerated = false
 -- Initialize session ID on new game
 script.on_init(function()
   storage.session_id = generate_session_id()
-  storage.last_tick = game.tick 
+  storage.last_tick = game.tick
 end)
 
 -- On load, set local flag to regenerate session

@@ -7,6 +7,7 @@ Minimal Factorio agent loop.
   - Writes structured events to named pipe → Rust client → Weave traces → wandb.ai
 """
 
+import datetime
 import json
 import os
 import re
@@ -176,6 +177,9 @@ def main():
 
     messages = []
     final_score = 0.0
+    total_tokens = 0
+    total_latency = 0
+    error_steps = 0
 
     for step in range(1, MAX_STEPS + 1):
         print(f"\n── Step {step}/{MAX_STEPS} ──")
@@ -209,6 +213,8 @@ def main():
         code = parse_lua_code(llm_text)
         tokens_in = response.usage.prompt_tokens
         tokens_out = response.usage.completion_tokens
+        total_tokens += tokens_in + tokens_out
+        total_latency += latency_ms
         messages.append({"role": "assistant", "content": llm_text})
 
         print(f"LLM ({latency_ms}ms, {tokens_out} tok): {code or '(no code)'}")
@@ -237,6 +243,7 @@ def main():
         final_score = get_production_score(rcon)
 
         if result["error"]:
+            error_steps += 1
             print(f"ERROR: {result['error']}")
             messages.append(
                 {"role": "user", "content": f"Error: {result['error']}"}
@@ -273,7 +280,40 @@ def main():
     )
 
     pipe.close()
+
+    # Append result to docs/results.json for the leaderboard
+    avg_lat = total_latency / MAX_STEPS if MAX_STEPS > 0 else 0
+    save_result(session_id, final_score, MAX_STEPS, total_tokens, avg_lat, error_steps)
     print(f"\n🏁 Done. Final score: {final_score}")
+
+
+RESULTS_PATH = os.path.join(os.path.dirname(__file__), "docs", "results.json")
+
+
+def save_result(session_id, final_score, total_steps, total_tokens, avg_latency_ms, error_steps):
+    """Append run result to docs/results.json (static leaderboard data)."""
+    try:
+        with open(RESULTS_PATH, "r") as f:
+            results = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        results = []
+
+    results.append({
+        "session_id": session_id,
+        "model": MODEL,
+        "task": TASK,
+        "final_score": final_score,
+        "total_steps": total_steps,
+        "total_tokens": total_tokens,
+        "avg_latency_ms": avg_latency_ms,
+        "error_steps": error_steps,
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+    })
+
+    with open(RESULTS_PATH, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"📊 Result saved to {RESULTS_PATH}")
 
 
 if __name__ == "__main__":

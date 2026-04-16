@@ -1,1 +1,35 @@
-[]
+[
+  {
+    "session_id": "agent_01ee8995",
+    "model": "cc/claude-sonnet-4-20250514",
+    "task": "open_play",
+    "final_score": 0.0,
+    "total_steps": 3,
+    "total_tokens": 830,
+    "avg_latency_ms": 224.66666666666666,
+    "error_steps": 0,
+    "timestamp": "2026-04-16T03:39:37.859676Z"
+  },
+  {
+    "session_id": "agent_af52555b",
+    "model": "cc/claude-sonnet-4-20250514",
+    "task": "open_play",
+    "final_score": 0.0,
+    "total_steps": 3,
+    "total_tokens": 2782,
+    "avg_latency_ms": 19781.666666666668,
+    "error_steps": 0,
+    "timestamp": "2026-04-16T03:41:23.546588Z"
+  },
+  {
+    "session_id": "agent_92a97b34",
+    "model": "cc/claude-sonnet-4-20250514",
+    "task": "open_play",
+    "final_score": 0.0,
+    "total_steps": 3,
+    "total_tokens": 2555,
+    "avg_latency_ms": 15973.0,
+    "error_steps": 0,
+    "timestamp": "2026-04-16T03:59:43.474533Z"
+  }
+]

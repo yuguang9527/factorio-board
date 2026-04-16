@@ -14,6 +14,8 @@ import re
 import time
 import uuid
 
+import subprocess
+
 import litellm
 from factorio_rcon import RCONClient
 
@@ -32,19 +34,26 @@ MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "50"))
 TASK = os.environ.get("AGENT_TASK", "open_play")
 
 SYSTEM_PROMPT = """\
-You are a Factorio agent. You control the game by writing Lua commands that run via RCON.
+You are a Factorio agent controlling a headless server via RCON Lua commands.
 
-Each turn you receive the current game state (inventory, production, position).
+Each turn you receive: tick, production stats, research status, entity count.
 Respond with:
 1. A short PLAN (what you want to do and why)
 2. A ```lua code block with commands to execute
 
+Key APIs (headless, no game.player):
+- game.surfaces[1] — the main surface (nauvis)
+- game.forces["player"] — the player force
+- game.surfaces[1].create_entity{name="...", position={x,y}, force="player"} — place entities
+- game.surfaces[1].find_entities_filtered{name="...", force="player"} — find entities
+- game.forces["player"].technologies["..."].researched = true — unlock tech
+- rcon.print(...) — output results you need to see
+
 Rules:
-- Use /sc prefix convention: your code runs as `game.player.` context
-- Use rcon.print() to output results you need
+- Use rcon.print() to output results
 - Keep each turn focused on one clear goal
-- Build incrementally: gather → craft → automate
-- Check what you have before trying to build
+- Build incrementally: mine → smelt → assemble → automate
+- Always check what exists before building
 """
 
 
@@ -56,36 +65,36 @@ def write_event(pipe, event: dict):
 
 
 def get_observation(rcon: RCONClient) -> str:
-    """Pull game state from Factorio via RCON."""
+    """Pull game state from Factorio via RCON (headless compatible)."""
     parts = []
 
-    # Player position
+    # Game tick
     try:
-        pos = rcon.send_command(
-            '/sc local p=game.player.position; rcon.print(string.format("x=%.1f y=%.1f", p.x, p.y))'
+        tick = rcon.send_command("/sc rcon.print(game.tick)")
+        parts.append(f"Tick: {tick.strip()}")
+    except Exception as e:
+        parts.append(f"Tick: error ({e})")
+
+    # Player (if connected) or note headless
+    try:
+        player_check = rcon.send_command(
+            '/sc local p=game.connected_players[1]; '
+            'if p then rcon.print(string.format("x=%.1f y=%.1f", p.position.x, p.position.y)) '
+            'else rcon.print("no_player") end'
         )
-        parts.append(f"Position: {pos.strip()}")
+        pos = player_check.strip()
+        if pos == "no_player":
+            parts.append("Mode: headless (no player connected)")
+        else:
+            parts.append(f"Position: {pos}")
     except Exception as e:
         parts.append(f"Position: error ({e})")
 
-    # Inventory
-    try:
-        inv = rcon.send_command(
-            "/sc local inv=game.player.get_main_inventory() "
-            "local t={} "
-            "for name,count in pairs(inv.get_contents()) do "
-            "  t[#t+1]=name..':'..count "
-            "end "
-            "rcon.print(table.concat(t, ', '))"
-        )
-        parts.append(f"Inventory: {inv.strip() or '(empty)'}")
-    except Exception as e:
-        parts.append(f"Inventory: error ({e})")
-
-    # Production stats (top items)
+    # Production stats (force-level, works headless)
     try:
         prod = rcon.send_command(
-            "/sc local s=game.player.force.get_item_production_statistics('nauvis') "
+            "/sc local f=game.forces['player'] "
+            "local s=f.get_item_production_statistics('nauvis') "
             "local t={} "
             "for name,_ in pairs(s.input_counts) do "
             "  local r=s.get_flow_count{name=name,input=true,precision_index=defines.flow_precision_index.one_minute,count=false} "
@@ -100,13 +109,22 @@ def get_observation(rcon: RCONClient) -> str:
     # Research
     try:
         research = rcon.send_command(
-            "/sc local r=game.player.force.current_research "
+            "/sc local r=game.forces['player'].current_research "
             "if r then rcon.print(r.name..' '..string.format('%.0f%%', r.research_progress*100)) "
             "else rcon.print('(none)') end"
         )
         parts.append(f"Research: {research.strip()}")
     except Exception as e:
         parts.append(f"Research: error ({e})")
+
+    # Entity count on surface
+    try:
+        entities = rcon.send_command(
+            "/sc rcon.print(#game.surfaces[1].find_entities_filtered{force='player'})"
+        )
+        parts.append(f"Entities: {entities.strip()}")
+    except Exception as e:
+        parts.append(f"Entities: error ({e})")
 
     return "\n".join(parts)
 
@@ -115,7 +133,7 @@ def get_production_score(rcon: RCONClient) -> float:
     """Simple production score: sum of all items produced."""
     try:
         result = rcon.send_command(
-            "/sc local s=game.player.force.get_item_production_statistics('nauvis') "
+            "/sc local s=game.forces['player'].get_item_production_statistics('nauvis') "
             "local total=0 "
             "for _,count in pairs(s.input_counts) do total=total+count end "
             "rcon.print(total)"
@@ -199,20 +217,37 @@ def main():
             },
         )
 
-        # LLM call (litellm: works with any model/provider)
+        # LLM call
         messages.append({"role": "user", "content": obs})
         t0 = time.time()
-        response = litellm.completion(
-            model=MODEL,
-            max_tokens=2048,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-        )
-        latency_ms = int((time.time() - t0) * 1000)
 
-        llm_text = response.choices[0].message.content
+        if MODEL.startswith("cc/"):
+            # Claude Code backend: uses Max subscription, no API key needed
+            cc_model = MODEL[3:]  # strip "cc/" prefix
+            prompt = SYSTEM_PROMPT + "\n\n" + "\n\n".join(
+                f"{'[User]' if m['role']=='user' else '[Assistant]'}: {m['content']}"
+                for m in messages
+            )
+            result_proc = subprocess.run(
+                ["claude", "-p", "--model", cc_model],
+                input=prompt, capture_output=True, text=True, timeout=120,
+            )
+            llm_text = result_proc.stdout.strip()
+            tokens_in = len(prompt) // 4  # estimate
+            tokens_out = len(llm_text) // 4
+        else:
+            # litellm: works with any model/provider (needs API key)
+            response = litellm.completion(
+                model=MODEL,
+                max_tokens=2048,
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+            )
+            llm_text = response.choices[0].message.content
+            tokens_in = response.usage.prompt_tokens
+            tokens_out = response.usage.completion_tokens
+
+        latency_ms = int((time.time() - t0) * 1000)
         code = parse_lua_code(llm_text)
-        tokens_in = response.usage.prompt_tokens
-        tokens_out = response.usage.completion_tokens
         total_tokens += tokens_in + tokens_out
         total_latency += latency_ms
         messages.append({"role": "assistant", "content": llm_text})

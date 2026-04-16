@@ -30,8 +30,12 @@ RCON_HOST = os.environ.get("FACTORIO_HOST", "localhost")
 RCON_PORT = int(os.environ.get("FACTORIO_RCON_PORT", "27015"))
 RCON_PASS = os.environ.get("FACTORIO_RCON_PASSWORD", "factorio")
 MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-4-20250514")
-MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "50"))
+MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "100"))
 TASK = os.environ.get("AGENT_TASK", "open_play")
+SCREENSHOT_DIR = os.environ.get(
+    "FACTORIO_OUTPUT_PATH",
+    os.path.expanduser("~/Library/Application Support/factorio/script-output"),
+)
 
 SYSTEM_PROMPT = """\
 You are a Factorio agent controlling a headless server via RCON Lua commands.
@@ -41,27 +45,52 @@ Respond with:
 1. A short PLAN (what you want to do and why)
 2. A ```lua code block with commands to execute
 
+HEADLESS MODE SPECIFICS:
+- No player character exists - use force="player" for entities
+- Technologies start locked - unlock them with force.technologies["..."].researched = true
+- Recipes start disabled - enable them with force.recipes["..."].enabled = true
+- Always use find_entities_filtered{force="player"} NOT find_entities() (avoids listing trees/rocks)
+- Entity placement requires valid terrain and unlocked technologies
+
 Key APIs (headless, no game.player):
 - game.surfaces[1] — the main surface (nauvis)
 - game.forces["player"] — the player force
 - game.surfaces[1].create_entity{name="...", position={x,y}, force="player"} — place entities
-- game.surfaces[1].find_entities_filtered{name="...", force="player"} — find entities
+- game.surfaces[1].find_entities_filtered{force="player"} — find YOUR entities only
 - game.forces["player"].technologies["..."].researched = true — unlock tech
+- game.forces["player"].recipes["..."].enabled = true — enable recipes
 - rcon.print(...) — output results you need to see
 
+BOOTSTRAP SEQUENCE (first few turns):
+1. Unlock basic technologies: automation, electronics, steel-processing
+2. Enable basic recipes: iron-plate, copper-plate, stone-furnace, burner-mining-drill, etc.
+3. Find resources with find_entities_filtered{name="iron-ore", area={{-100,-100},{100,100}}}
+4. Place mining drills on resource patches
+5. Connect with smelting: drill → inserter → furnace → inserter → chest
+
+PRODUCTION STRATEGY:
+- Build incrementally: mine → smelt → assemble → science packs
+- Feed assemblers manually with .insert{} commands to keep production flowing
+- Scale with multiple assemblers for higher throughput
+- Aim for automation-science-pack production first, then logistic-science-pack
+
 Rules:
-- Use rcon.print() to output results
+- Use rcon.print() to output important results
 - Keep each turn focused on one clear goal
-- Build incrementally: mine → smelt → assemble → automate
-- Always check what exists before building
+- Always check what exists before building with find_entities_filtered{force="player"}
+- Resources may be far from spawn (100+ tiles away) — search large areas
+- If you can't find iron/copper nearby, expand search to area={{-200,-200},{200,200}} or wider
+- Unlock technologies and enable recipes BEFORE trying to place entities
+- Use manual material feeding (.insert{}) to bootstrap production chains
 """
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
 def write_event(pipe, event: dict):
     """Write a JSON event line to the pipe."""
-    pipe.write(json.dumps(event, ensure_ascii=False) + "\n")
-    pipe.flush()
+    if pipe:
+        pipe.write(json.dumps(event, ensure_ascii=False) + "\n")
+        pipe.flush()
 
 
 def get_observation(rcon: RCONClient) -> str:
@@ -158,6 +187,132 @@ def execute_code(rcon: RCONClient, code: str) -> dict:
         return {"output": "", "error": str(e)}
 
 
+def bootstrap_headless_session(rcon: RCONClient) -> bool:
+    """Bootstrap headless session: clear achievement warning and unlock basic technologies."""
+    try:
+        print("🚀 Bootstrapping headless session...")
+
+        # Clear achievement warning by sending dummy command twice
+        print("  Clearing achievement warning...")
+        rcon.send_command("/sc game.tick")  # First call triggers warning
+        time.sleep(0.1)
+        rcon.send_command("/sc game.tick")  # Second call actually executes
+
+        # Unlock essential starting technologies
+        print("  Unlocking basic technologies...")
+        tech_commands = [
+            "local force = game.forces['player']",
+            "force.technologies['automation'].researched = true",
+            "force.technologies['electronics'].researched = true",
+            "force.technologies['steel-processing'].researched = true",
+            "force.technologies['logistics'].researched = true",
+        ]
+        rcon.send_command("/sc " + "; ".join(tech_commands))
+
+        # Enable essential recipes
+        print("  Enabling basic recipes...")
+        recipe_commands = [
+            "force.recipes['iron-plate'].enabled = true",
+            "force.recipes['copper-plate'].enabled = true",
+            "force.recipes['stone-furnace'].enabled = true",
+            "force.recipes['burner-mining-drill'].enabled = true",
+            "force.recipes['wooden-chest'].enabled = true",
+            "force.recipes['transport-belt'].enabled = true",
+            "force.recipes['inserter'].enabled = true",
+            "force.recipes['lab'].enabled = true",
+            "force.recipes['assembling-machine-1'].enabled = true",
+            "force.recipes['electronic-circuit'].enabled = true",
+            "force.recipes['copper-cable'].enabled = true",
+            "force.recipes['iron-gear-wheel'].enabled = true",
+            "force.recipes['automation-science-pack'].enabled = true",
+            "force.recipes['logistic-science-pack'].enabled = true"
+        ]
+        rcon.send_command("/sc " + "; ".join(recipe_commands))
+
+        # Verify bootstrap success
+        result = rcon.send_command("/sc rcon.print('Bootstrap complete - ' .. tostring(game.forces['player'].technologies['automation'].researched))")
+        if "Bootstrap complete - true" in result:
+            print("✅ Bootstrap successful!")
+            return True
+        else:
+            print(f"⚠️  Bootstrap verification failed: {result}")
+            return False
+
+    except Exception as e:
+        print(f"❌ Bootstrap failed: {e}")
+        return False
+
+
+def weave_sender_running() -> bool:
+    """Check if weave-sender process is running."""
+    try:
+        result = subprocess.run(["pgrep", "-f", "weave-sender"],
+                              capture_output=True, text=True)
+        return result.returncode == 0
+    except:
+        return False
+
+
+def ensure_weave_client():
+    """Start weave-sender if not running, with fallback to no-pipe mode."""
+    try:
+        # Check if weave-sender is already running
+        if not weave_sender_running():
+            print("🔄 Starting weave-sender client...")
+            # Start weave-sender in background
+            weave_process = subprocess.Popen(
+                ["./binaries/weave-sender"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=os.path.dirname(os.path.abspath(__file__))
+            )
+            time.sleep(2)  # Brief startup delay
+
+            if weave_sender_running():
+                print("✅ weave-sender started successfully")
+            else:
+                print("⚠️  weave-sender startup failed, continuing without tracing")
+                return None
+        else:
+            print("✅ weave-sender already running")
+
+        # TEMP: Skip pipe connection until weave integration is properly configured
+        # The weave-sender uses socket files, not this named pipe
+        print("⚠️  Skipping pipe connection (weave uses sockets, not pipe)")
+        print("📝 Agent will run without Weave tracing for now")
+        return None
+
+    except Exception as e:
+        print(f"⚠️  Pipe connection failed ({e}), continuing without tracing")
+        return None
+
+
+def take_screenshot(rcon: RCONClient, session_id: str, step: int) -> str | None:
+    """Take a screenshot via RCON, copy from Docker, return the local path."""
+    rel_path = f"screenshots/{session_id}/step_{step:04d}.png"
+    local_dir = os.path.join(SCREENSHOT_DIR, "screenshots", session_id)
+    local_path = os.path.join(local_dir, f"step_{step:04d}.png")
+    try:
+        rcon.send_command(
+            f'/sc game.take_screenshot{{surface=game.surfaces[1], '
+            f'position={{0,0}}, resolution={{1920,1080}}, zoom=0.3, '
+            f'path="{rel_path}", show_entity_info=true}}'
+        )
+        time.sleep(0.3)  # wait for file to be written
+        os.makedirs(local_dir, exist_ok=True)
+        subprocess.run(
+            ["docker", "cp", f"factorio:/factorio/script-output/{rel_path}", local_path],
+            capture_output=True, timeout=10,
+        )
+        if os.path.exists(local_path):
+            return rel_path
+        print(f"⚠️  docker cp failed for {rel_path}")
+        return None
+    except Exception as e:
+        print(f"⚠️  Screenshot failed: {e}")
+        return None
+
+
 # ── Main loop ───────────────────────────────────────────────────────
 def main():
     session_id = f"agent_{uuid.uuid4().hex[:8]}"
@@ -166,8 +321,15 @@ def main():
     print(f"   RCON: {RCON_HOST}:{RCON_PORT}")
     print(f"   Pipe: {PIPE_PATH}")
 
-    rcon = RCONClient(RCON_HOST, RCON_PORT, RCON_PASS)
-    pipe = open(PIPE_PATH, "a")
+    def connect_rcon():
+        return RCONClient(RCON_HOST, RCON_PORT, RCON_PASS)
+
+    rcon = connect_rcon()
+    pipe = ensure_weave_client()  # Auto-start weave-sender + connect to pipe
+
+    # Bootstrap headless session (clear achievement warning + unlock technologies)
+    if not bootstrap_headless_session(rcon):
+        print("❌ Failed to bootstrap session, continuing anyway...")
 
     # Session init (triggers Rust client session creation)
     write_event(
@@ -202,8 +364,13 @@ def main():
     for step in range(1, MAX_STEPS + 1):
         print(f"\n── Step {step}/{MAX_STEPS} ──")
 
-        # Observe
-        obs = get_observation(rcon)
+        # Observe (reconnect RCON if needed)
+        try:
+            obs = get_observation(rcon)
+        except Exception:
+            print("🔄 RCON reconnecting...")
+            rcon = connect_rcon()
+            obs = get_observation(rcon)
         print(obs)
 
         write_event(
@@ -228,11 +395,15 @@ def main():
                 f"{'[User]' if m['role']=='user' else '[Assistant]'}: {m['content']}"
                 for m in messages
             )
-            result_proc = subprocess.run(
-                ["claude", "-p", "--model", cc_model],
-                input=prompt, capture_output=True, text=True, timeout=120,
-            )
-            llm_text = result_proc.stdout.strip()
+            try:
+                result_proc = subprocess.run(
+                    ["claude", "-p", "--model", cc_model],
+                    input=prompt, capture_output=True, text=True, timeout=300,
+                )
+                llm_text = result_proc.stdout.strip()
+            except subprocess.TimeoutExpired:
+                print(f"⚠️  claude -p timed out at 300s, skipping step {step}")
+                llm_text = ""
             tokens_in = len(prompt) // 4  # estimate
             tokens_out = len(llm_text) // 4
         else:

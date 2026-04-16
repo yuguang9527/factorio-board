@@ -662,6 +662,75 @@ impl WeaveManager {
         }
     }
 
+    /// Log a traced call with explicit duration (started_at back-dated from latency)
+    async fn log_traced_call_with_duration(
+        &self,
+        operation: String,
+        inputs: HashMap<String, serde_json::Value>,
+        outputs: HashMap<String, serde_json::Value>,
+        trace_id: String,
+        parent_id: Option<String>,
+        duration_ms: i64,
+    ) {
+        if let Err(e) = self.ensure_client().await {
+            eprintln!("⚠️  Failed to ensure Weave client: {}", e);
+            return;
+        }
+
+        let session_id = {
+            let guard = self.current_session_id.lock().await;
+            match guard.as_ref() {
+                Some(id) => id.clone(),
+                None => return,
+            }
+        };
+
+        let call_id = Uuid::now_v7().to_string();
+        let ended_at = Utc::now();
+        let started_at = ended_at - chrono::Duration::milliseconds(duration_ms);
+
+        let client_guard = self.client.lock().await;
+        let client = match client_guard.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let mut inputs_with_session = inputs;
+        inputs_with_session.insert("session_id".to_string(), serde_json::json!(&session_id));
+
+        let start = StartedCallSchemaForInsert {
+            project_id: self.config.project_id(),
+            id: Some(call_id.clone()),
+            op_name: operation,
+            display_name: None,
+            trace_id: Some(trace_id),
+            parent_id,
+            thread_id: Some(session_id),
+            turn_id: Some(call_id.clone()),
+            started_at,
+            attributes: HashMap::new(),
+            inputs: inputs_with_session,
+        };
+
+        if let Err(e) = client.start_call(start).await {
+            eprintln!("⚠️  Failed to send traced start call: {}", e);
+            return;
+        }
+
+        let end = EndedCallSchemaForInsert {
+            project_id: self.config.project_id(),
+            id: call_id,
+            ended_at,
+            exception: None,
+            output: Some(serde_json::to_value(&outputs).unwrap()),
+            summary: HashMap::new(),
+        };
+
+        if let Err(e) = client.end_call(end).await {
+            eprintln!("⚠️  Failed to send traced end call: {}", e);
+        }
+    }
+
     /// Dispatch agent events from the pipe
     pub async fn handle_agent_event(
         &self,
@@ -673,6 +742,7 @@ impl WeaveManager {
             "step_start" => self.handle_step_start(data).await,
             "llm_response" => self.handle_llm_response(data).await,
             "code_result" => self.handle_code_result(data).await,
+            "screenshot" => self.handle_screenshot(data).await,
             "trajectory_end" => self.handle_trajectory_end(data).await,
             _ => eprintln!("⚠️  Unknown agent event: {}", event_name),
         }
@@ -743,24 +813,33 @@ impl WeaveManager {
             .unwrap_or(0) as u32;
         let step_call_id = self.agent_steps.lock().await.get(&step).cloned();
 
-        let inputs = HashMap::new(); // observation already in step_start
+        let latency_ms = data
+            .get("latency_ms")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let mut inputs = HashMap::new();
+        inputs.insert("tokens_in".to_string(), data.get("tokens_in").cloned().unwrap_or(serde_json::json!(0)));
 
         let mut outputs = HashMap::new();
-        for key in ["code", "reasoning", "tokens_in", "tokens_out", "latency_ms"] {
+        for key in ["reasoning", "code"] {
             if let Some(v) = data.get(key) {
                 outputs.insert(key.to_string(), v.clone());
             }
         }
+        outputs.insert("tokens_out".to_string(), data.get("tokens_out").cloned().unwrap_or(serde_json::json!(0)));
+        outputs.insert("latency_ms".to_string(), serde_json::json!(latency_ms));
 
-        self.log_traced_call(
+        self.log_traced_call_with_duration(
             "llm_call".to_string(),
             inputs,
             outputs,
             traj.trace_id,
             step_call_id,
+            latency_ms,
         )
         .await;
-        println!("🤖 LLM response logged for step {}", step);
+        println!("🤖 LLM response logged for step {} ({}ms)", step, latency_ms);
     }
 
     async fn handle_code_result(&self, data: &HashMap<String, serde_json::Value>) {
@@ -779,32 +858,103 @@ impl WeaveManager {
         }
 
         let mut outputs = HashMap::new();
-        for key in ["output", "error", "reward", "production_score"] {
+        for key in ["output", "error"] {
             if let Some(v) = data.get(key) {
                 outputs.insert(key.to_string(), v.clone());
             }
         }
+        let production_score = data.get("production_score").cloned().unwrap_or(serde_json::json!(0));
+        outputs.insert("production_score".to_string(), production_score.clone());
 
-        // Log the code_exec span
-        self.log_traced_call(
+        // Log the code_exec span with 500ms duration (RCON execution time)
+        self.log_traced_call_with_duration(
             "code_exec".to_string(),
             inputs,
             outputs.clone(),
             traj.trace_id.clone(),
             step_call_id.clone(),
+            500, // RCON exec is fast, ~500ms
         )
         .await;
 
-        // End the parent step span
+        // End the parent step span with summary
         if let Some(step_id) = step_call_id {
             let has_error = data
                 .get("error")
                 .map(|v| !v.is_null() && v.as_str() != Some(""))
                 .unwrap_or(false);
-            self.end_traced_call(&step_id, outputs, !has_error).await;
+            let mut step_outputs = HashMap::new();
+            step_outputs.insert("production_score".to_string(), production_score);
+            if has_error {
+                step_outputs.insert("error".to_string(), data.get("error").cloned().unwrap_or(serde_json::json!(null)));
+            }
+            if let Some(v) = data.get("output") {
+                step_outputs.insert("result".to_string(), v.clone());
+            }
+            self.end_traced_call(&step_id, step_outputs, !has_error).await;
             self.agent_steps.lock().await.remove(&step);
         }
         println!("🤖 Code result logged for step {}", step);
+    }
+
+    async fn handle_screenshot(&self, data: &HashMap<String, serde_json::Value>) {
+        let traj = self.agent_trajectory.lock().await.clone();
+        let Some(traj) = traj else { return };
+
+        let step = data
+            .get("step")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        let screenshot_path = match data.get("screenshot_path").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return,
+        };
+
+        // Read screenshot from Factorio's script-output directory
+        let full_path = {
+            let output_path = std::env::var("FACTORIO_OUTPUT_PATH").unwrap_or_default();
+            std::path::PathBuf::from(output_path).join(&screenshot_path)
+        };
+
+        let screenshot_data = match self.read_screenshot(&screenshot_path).await {
+            Ok(data) => data,
+            Err(e) => {
+                // Try with full path
+                match tokio::fs::read(&full_path).await {
+                    Ok(bytes) => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        format!("data:image/png;base64,{}", b64)
+                    }
+                    Err(_) => {
+                        eprintln!("⚠️  Screenshot not found: {} ({})", screenshot_path, e);
+                        return;
+                    }
+                }
+            }
+        };
+
+        let step_call_id = self.agent_steps.lock().await.get(&step).cloned();
+
+        let mut inputs = HashMap::new();
+        inputs.insert("step".to_string(), serde_json::json!(step));
+        inputs.insert(
+            "screenshot".to_string(),
+            serde_json::json!({"_type": "image-file", "data": screenshot_data}),
+        );
+
+        let outputs = HashMap::new();
+
+        self.log_traced_call(
+            "screenshot".to_string(),
+            inputs,
+            outputs,
+            traj.trace_id,
+            step_call_id,
+        )
+        .await;
+        println!("📸 Screenshot logged for step {}", step);
     }
 
     async fn handle_trajectory_end(&self, data: &HashMap<String, serde_json::Value>) {

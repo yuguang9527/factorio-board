@@ -136,5 +136,16 @@
     "avg_latency_ms": 12363.52,
     "error_steps": 0,
     "timestamp": "2026-04-17T22:22:16.309378Z"
+  },
+  {
+    "session_id": "agent_c24fc5ae",
+    "model": "cc/claude-sonnet-4-20250514",
+    "task": "build_iron_to_science_chain",
+    "final_score": 1.0,
+    "total_steps": 25,
+    "total_tokens": 18811,
+    "avg_latency_ms": 15575.32,
+    "error_steps": 0,
+    "timestamp": "2026-04-17T22:30:31.071514Z"
   }
 ]

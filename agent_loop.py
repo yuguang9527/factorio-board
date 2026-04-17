@@ -109,7 +109,7 @@ def take_screenshot(rcon: RCONClient, session_id: str, step: int) -> str | None:
     rel_path = f"screenshots/{session_id}/step_{step:04d}.png"
     full_path = os.path.join(SCREENSHOT_DIR, rel_path)
     try:
-        bp = export_blueprint(rcon, area=((-40, -40), (40, 40)))
+        bp = export_blueprint(rcon)  # area=None → auto-fit to entity bbox
         if not bp or not bp.startswith("0"):
             return None
         jid = enqueue_render(bp, full_path, job_id=f"{session_id}_{step:04d}")

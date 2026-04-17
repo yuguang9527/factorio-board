@@ -15,10 +15,11 @@ def _cmd(rcon: RCONClient, lua: str) -> str:
 
 
 def get_player_state(rcon: RCONClient) -> dict:
-    """Get full player state: position, inventory, nearby resources/entities."""
+    """Get full player state: position, inventory, nearby resources/entities.
+    Falls back to origin-centered observation when no player is connected."""
     state = {}
 
-    # Position
+    # Position — use player if connected, else origin
     r = _cmd(rcon,
         'local p=game.connected_players[1] '
         'if p then rcon.print(string.format("%.1f,%.1f", p.position.x, p.position.y)) '
@@ -26,26 +27,30 @@ def get_player_state(rcon: RCONClient) -> dict:
     if r and r != "none":
         x, y = r.split(",")
         state["position"] = {"x": float(x), "y": float(y)}
+        state["headless"] = False
     else:
-        state["position"] = None
-        return state
+        state["position"] = {"x": 0.0, "y": 0.0}
+        state["headless"] = True
 
     px, py = state["position"]["x"], state["position"]["y"]
 
-    # Inventory (key items)
-    r = _cmd(rcon,
-        'local p=game.connected_players[1] '
-        'local items={"wood","stone","coal","iron-ore","copper-ore","iron-plate",'
-        '"copper-plate","iron-gear-wheel","copper-cable","electronic-circuit",'
-        '"stone-furnace","burner-mining-drill","burner-inserter","transport-belt",'
-        '"wooden-chest","assembling-machine-1","automation-science-pack","inserter"} '
-        'local t={} '
-        'for _,name in pairs(items) do '
-        '  local c=p.get_item_count(name) '
-        '  if c>0 then t[#t+1]=name..":"..c end '
-        'end '
-        'rcon.print(#t>0 and table.concat(t,", ") or "(empty)")')
-    state["inventory"] = r
+    # Inventory — player inventory if connected, else "(headless)"
+    if state["headless"]:
+        state["inventory"] = "(headless — no player inventory; use create_entity)"
+    else:
+        r = _cmd(rcon,
+            'local p=game.connected_players[1] '
+            'local items={"wood","stone","coal","iron-ore","copper-ore","iron-plate",'
+            '"copper-plate","iron-gear-wheel","copper-cable","electronic-circuit",'
+            '"stone-furnace","burner-mining-drill","burner-inserter","transport-belt",'
+            '"wooden-chest","assembling-machine-1","automation-science-pack","inserter"} '
+            'local t={} '
+            'for _,name in pairs(items) do '
+            '  local c=p.get_item_count(name) '
+            '  if c>0 then t[#t+1]=name..":"..c end '
+            'end '
+            'rcon.print(#t>0 and table.concat(t,", ") or "(empty)")')
+        state["inventory"] = r
 
     # Nearby resources (within 30 tiles)
     r = _cmd(rcon,
@@ -263,8 +268,84 @@ def run_lua(rcon: RCONClient, code: str) -> str:
     return _cmd(rcon, code)
 
 
+# ── Cheat actions (RCON-only, no player required) ──────────────────
+
+def unlock_all(rcon: RCONClient) -> str:
+    """Research all technologies and enable all recipes for the player force."""
+    r = _cmd(rcon,
+        'local f=game.forces["player"] '
+        'for _,t in pairs(f.technologies) do t.researched=true end '
+        'for _,r in pairs(f.recipes) do r.enabled=true end '
+        'rcon.print("unlocked "..table_size(f.technologies).." techs, "'
+        '..table_size(f.recipes).." recipes")')
+    return r or "unlock_all: no response"
+
+
+def give(rcon: RCONClient, item: str, count: int = 100) -> str:
+    """Give items directly to the player inventory (requires connected client)."""
+    r = _cmd(rcon,
+        f'local p=game.connected_players[1] '
+        f'if not p then rcon.print("ERROR: no connected player") '
+        f'else local n=p.insert{{name="{item}",count={count}}} '
+        f'rcon.print("gave "..n.." "..(n==1 and "{item}" or "{item}s")) end')
+    return r or "give: no response"
+
+
+def teleport(rcon: RCONClient, x: float, y: float) -> str:
+    """Teleport the player to a position (requires connected client)."""
+    r = _cmd(rcon,
+        f'local p=game.connected_players[1] '
+        f'if not p then rcon.print("ERROR: no connected player") '
+        f'else p.teleport({{{x},{y}}}) '
+        f'rcon.print("teleported to ("..p.position.x..","..p.position.y..")") end')
+    return r or "teleport: no response"
+
+
+def create_entity(rcon: RCONClient, name: str, x: float, y: float,
+                  direction: str = "north") -> str:
+    """Create an entity directly on the surface (no player needed).
+    Cheat mode — bypasses inventory and reach distance."""
+    dir_map = {
+        "north": "defines.direction.north",
+        "south": "defines.direction.south",
+        "east":  "defines.direction.east",
+        "west":  "defines.direction.west",
+    }
+    d = dir_map.get(direction, "defines.direction.north")
+    r = _cmd(rcon,
+        f'local e=game.surfaces[1].create_entity{{'
+        f'name="{name}",position={{{x},{y}}},'
+        f'direction={d},force="player"}} '
+        f'if e then rcon.print("created "..e.name.." at ("..e.position.x'
+        f'..","..e.position.y..")") '
+        f'else rcon.print("ERROR: could not create {name} at ({x},{y})") end')
+    return r or "create_entity: no response"
+
+
+def list_entities(rcon: RCONClient, radius: int = 50) -> str:
+    """List player-force entities within radius of origin (or player if connected)."""
+    r = _cmd(rcon,
+        f'local cx,cy=0,0 '
+        f'local p=game.connected_players[1] '
+        f'if p then cx,cy=p.position.x,p.position.y end '
+        f'local es=game.surfaces[1].find_entities_filtered{{'
+        f'force="player",position={{cx,cy}},radius={radius}}} '
+        f'local counts={{}} '
+        f'for _,e in pairs(es) do '
+        f'  counts[e.name]=(counts[e.name] or 0)+1 end '
+        f'local t={{}} '
+        f'for n,c in pairs(counts) do t[#t+1]=n..":"..c end '
+        f'rcon.print(#t>0 and table.concat(t,", ") or "no entities")')
+    return r or "list_entities: no response"
+
+
 # Action registry — maps action names to (function, description)
 ACTIONS = {
+    "unlock_all": (unlock_all, "unlock_all — Research all tech and enable all recipes (cheat)"),
+    "give": (give, "give <item> [count] — Give items to player inventory (cheat, needs client)"),
+    "teleport": (teleport, "teleport <x> <y> — Teleport player (needs client)"),
+    "create_entity": (create_entity, "create_entity <name> <x> <y> [dir] — Spawn entity directly (cheat, no client needed)"),
+    "list_entities": (list_entities, "list_entities [radius] — List your entities around you/origin"),
     "walk_to": (walk_to, "walk_to <x> <y> — Walk to coordinates"),
     "mine": (mine_resource, "mine <resource> [count] — Mine resource by hand (e.g., mine iron-ore 10)"),
     "craft": (craft_item, "craft <recipe> [count] — Craft items (e.g., craft stone-furnace 1)"),
@@ -304,5 +385,18 @@ def execute_action(rcon: RCONClient, action_text: str) -> str:
         return scan_area(rcon, radius)
     elif action == "lua" and args:
         return run_lua(rcon, " ".join(args))
+    elif action == "unlock_all":
+        return unlock_all(rcon)
+    elif action == "give" and len(args) >= 1:
+        count = int(args[1]) if len(args) > 1 else 100
+        return give(rcon, args[0], count)
+    elif action == "teleport" and len(args) >= 2:
+        return teleport(rcon, float(args[0]), float(args[1]))
+    elif action == "create_entity" and len(args) >= 3:
+        direction = args[3] if len(args) > 3 else "north"
+        return create_entity(rcon, args[0], float(args[1]), float(args[2]), direction)
+    elif action == "list_entities":
+        radius = int(args[0]) if args else 50
+        return list_entities(rcon, radius)
     else:
         return f"ERROR: unknown action '{action_text}'. Available: " + ", ".join(ACTIONS.keys())

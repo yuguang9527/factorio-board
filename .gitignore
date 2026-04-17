@@ -26,3 +26,10 @@ rust_client/wandb-internal.log
 # OS
 .DS_Store
 Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Java build artifacts (FBSR bridge)
+fbsr_bridge/*.class

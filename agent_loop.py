@@ -44,34 +44,34 @@ SCREENSHOT_DIR = os.environ.get(
 ACTION_LIST = "\n".join(f"  {desc}" for _, desc in ACTIONS.values())
 
 SYSTEM_PROMPT = f"""\
-You are a Factorio agent controlling a real player character. You must play legitimately:
-walk to resources, mine by hand, craft items, and place buildings from inventory.
+You are a Factorio agent running in CHEAT MODE — all tech is unlocked and you
+spawn entities directly on the surface via RCON. No walking, no mining, no
+inventory. Your job: build a working factory that produces science packs.
 
-Each turn you see your position, inventory, nearby resources, and buildings.
-Respond with ONE action per turn. Just the action, nothing else.
+Each turn you see the current state (entities near origin, production stats).
+Respond with ONE action per turn. Just the action text, nothing else.
 
 Available actions:
 {ACTION_LIST}
 
-STRATEGY — follow this order:
-1. scan 100 — find nearby resources
-2. mine stone 10 — get stone for furnaces
-3. mine coal 10 — get fuel
-4. mine iron-ore 20 — get iron ore
-5. craft stone-furnace 2 — make furnaces
-6. place stone-furnace <x> <y> — place near resources
-7. mine iron-ore 30 — mine more iron
-8. lua <code> — feed furnace: game.connected_players[1].get_closest_entity({{name="stone-furnace"}}).insert({{name="iron-ore", count=20}})
-9. craft burner-mining-drill 1 — automate mining
-10. place burner-mining-drill <x> <y> south — place on iron ore patch
+STRATEGY — build a working iron-plate → science-pack chain near (0,0):
+1. scan 100 — find nearby ore patches (iron-ore, copper-ore, coal, stone)
+2. create_entity burner-mining-drill <x> <y> south — spawn drill on iron-ore
+3. create_entity stone-furnace <x> <y+2> — spawn furnace below drill output
+4. create_entity burner-inserter <x+1> <y+2> west — insert from furnace to chest
+5. create_entity wooden-chest <x+2> <y+2> — collect iron plates
+6. lua game.surfaces[1].find_entities_filtered{{name="stone-furnace"}}[1].insert{{name="coal",count=50}} — fuel the furnace
+7. lua game.surfaces[1].find_entities_filtered{{name="burner-mining-drill"}}[1].insert{{name="coal",count=50}} — fuel the drill
+8. create_entity assembling-machine-1 <x> <y> — craft science packs
+9. list_entities 50 — verify what you built
 
 RULES:
 - ONE action per turn, just the action text
 - No markdown, no explanation, no code blocks
-- You need ingredients to craft (check your inventory)
-- Walk close before placing
-- Furnaces need fuel (coal) AND ore to work
-- Mine stone first (you start with nothing)
+- Prefer create_entity over craft/place (you have no inventory in cheat mode)
+- Use `lua` for anything not covered by actions
+- Drills need to be placed ON ore tiles, facing the direction of output
+- Burner machines need coal fuel — insert via `lua`
 """
 
 
@@ -96,26 +96,23 @@ def ensure_pipe():
 
 
 def take_screenshot(rcon: RCONClient, session_id: str, step: int) -> str | None:
-    """Take a screenshot centered on the player."""
+    """Render a top-down PNG of the play area via FBSR worker (Redis queue).
+    Headless — no Factorio client needed. Blocks up to ~15s waiting for render."""
+    from fbsr_bridge.fbsr_client import export_blueprint, enqueue_render, wait_for_render
+
     rel_path = f"screenshots/{session_id}/step_{step:04d}.png"
     full_path = os.path.join(SCREENSHOT_DIR, rel_path)
     try:
-        rcon.send_command(
-            f'/sc local p=game.connected_players[1] '
-            f'if p then '
-            f'  game.take_screenshot{{player=p, resolution={{1920,1080}}, zoom=0.5, '
-            f'  path="{rel_path}", show_entity_info=true}} '
-            f'else '
-            f'  game.take_screenshot{{surface=game.surfaces[1], position={{0,0}}, '
-            f'  resolution={{1920,1080}}, zoom=0.3, '
-            f'  path="{rel_path}", show_entity_info=true}} '
-            f'end'
-        )
-        time.sleep(0.3)
-        if os.path.exists(full_path):
+        bp = export_blueprint(rcon, area=((-40, -40), (40, 40)))
+        if not bp or not bp.startswith("0"):
+            return None
+        jid = enqueue_render(bp, full_path, job_id=f"{session_id}_{step:04d}")
+        status = wait_for_render(jid, timeout=15.0)
+        if status == "OK" and os.path.exists(full_path):
             return rel_path
         return None
-    except Exception:
+    except Exception as e:
+        print(f"⚠️  render failed: {e}")
         return None
 
 

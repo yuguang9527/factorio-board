@@ -240,10 +240,11 @@ def place_item(rcon: RCONClient, item: str, x: float, y: float, direction: str =
 
 
 def scan_area(rcon: RCONClient, radius: int = 100) -> str:
-    """Scan for resources around the player."""
+    """Scan for resources around the player (or origin if headless)."""
     r = _cmd(rcon,
         f'local p=game.connected_players[1] '
-        f'local px,py=p.position.x,p.position.y '
+        f'local px,py=0,0 '
+        f'if p then px,py=p.position.x,p.position.y end '
         f'local t={{}} '
         f'for _,name in pairs({{"iron-ore","copper-ore","coal","stone"}}) do '
         f'  local e=game.surfaces[1].find_entities_filtered{{name=name, '

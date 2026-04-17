@@ -201,9 +201,15 @@ def call_llm(prompt: str) -> tuple[str, int, int]:
 
 
 # ── Main loop ───────────────────────────────────────────────────────
+WEAVE_ENTITY = os.environ.get("WEAVE_ENTITY", "weave-trace-move")
+WEAVE_PROJECT = os.environ.get("WEAVE_PROJECT", "factorio-experiments")
+
+
 def main():
     session_id = f"agent_{uuid.uuid4().hex[:8]}"
+    weave_url = f"https://wandb.ai/{WEAVE_ENTITY}/{WEAVE_PROJECT}/weave/traces"
     print(f"🤖 Agent: session={session_id} model={MODEL} steps={MAX_STEPS}")
+    print(f"🔗 Weave: {weave_url}")
 
     rcon = RCONClient(RCON_HOST, RCON_PORT, RCON_PASS)
     pipe = ensure_pipe()
@@ -362,6 +368,7 @@ def main():
     avg_lat = total_latency / MAX_STEPS if MAX_STEPS > 0 else 0
     save_result(session_id, final_score, MAX_STEPS, total_tokens, avg_lat, error_steps)
     print(f"\n🏁 Done. Final score: {final_score}")
+    print(f"🔗 Trace: https://wandb.ai/{WEAVE_ENTITY}/{WEAVE_PROJECT}/weave/traces?filter=\"{session_id}\"")
 
 
 RESULTS_PATH = os.path.join(os.path.dirname(__file__), "docs", "results.json")

@@ -92,5 +92,27 @@
     "avg_latency_ms": 0.0,
     "error_steps": 0,
     "timestamp": "2026-04-17T08:52:28.939057Z"
+  },
+  {
+    "session_id": "agent_cb3bdd80",
+    "model": "cc/claude-sonnet-4-20250514",
+    "task": "open_play",
+    "final_score": 2.0,
+    "total_steps": 3,
+    "total_tokens": 2169,
+    "avg_latency_ms": 11759.0,
+    "error_steps": 0,
+    "timestamp": "2026-04-17T09:03:25.245966Z"
+  },
+  {
+    "session_id": "agent_e6367ae8",
+    "model": "cc/claude-sonnet-4-20250514",
+    "task": "open_play",
+    "final_score": 2.0,
+    "total_steps": 3,
+    "total_tokens": 2104,
+    "avg_latency_ms": 12442.666666666666,
+    "error_steps": 0,
+    "timestamp": "2026-04-17T09:07:20.087667Z"
   }
 ]

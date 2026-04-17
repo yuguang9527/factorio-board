@@ -81,5 +81,16 @@
     "avg_latency_ms": 42137.2,
     "error_steps": 0,
     "timestamp": "2026-04-16T05:53:07.425020Z"
+  },
+  {
+    "session_id": "agent_53a1d829",
+    "model": "scripted",
+    "task": "open_play",
+    "final_score": 2.0,
+    "total_steps": 5,
+    "total_tokens": 3480,
+    "avg_latency_ms": 0.0,
+    "error_steps": 0,
+    "timestamp": "2026-04-17T08:52:28.939057Z"
   }
 ]

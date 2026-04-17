@@ -154,8 +154,28 @@ def parse_action_from_llm(text: str) -> str:
     return text.strip()
 
 
+_SCRIPTED_ACTIONS = [
+    "unlock_all",
+    "create_entity stone-furnace 0 0",
+    "create_entity stone-furnace 2 0",
+    "create_entity burner-mining-drill 5 0 south",
+    "create_entity wooden-chest 8 0",
+    "create_entity assembling-machine-1 -4 0",
+    "create_entity assembling-machine-2 -7 0",
+    "list_entities 30",
+    'lua game.surfaces[1].find_entities_filtered{name="stone-furnace"}[1].insert{name="coal",count=50} rcon.print("fueled")',
+    "list_entities 30",
+]
+_SCRIPTED_IDX = [0]
+
+
 def call_llm(prompt: str) -> tuple[str, int, int]:
     """Call LLM and return (text, tokens_in, tokens_out)."""
+    if MODEL == "scripted":
+        # Smoke-test mode: cycle through a canned action sequence.
+        text = _SCRIPTED_ACTIONS[_SCRIPTED_IDX[0] % len(_SCRIPTED_ACTIONS)]
+        _SCRIPTED_IDX[0] += 1
+        return text, len(prompt) // 4, len(text) // 4
     if MODEL.startswith("cc/"):
         cc_model = MODEL[3:]
         try:

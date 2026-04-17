@@ -274,10 +274,10 @@ def unlock_all(rcon: RCONClient) -> str:
     """Research all technologies and enable all recipes for the player force."""
     r = _cmd(rcon,
         'local f=game.forces["player"] '
-        'for _,t in pairs(f.technologies) do t.researched=true end '
-        'for _,r in pairs(f.recipes) do r.enabled=true end '
-        'rcon.print("unlocked "..table_size(f.technologies).." techs, "'
-        '..table_size(f.recipes).." recipes")')
+        'local nt,nr=0,0 '
+        'for _,t in pairs(f.technologies) do t.researched=true nt=nt+1 end '
+        'for _,rc in pairs(f.recipes) do rc.enabled=true nr=nr+1 end '
+        'rcon.print("unlocked "..nt.." techs, "..nr.." recipes")')
     return r or "unlock_all: no response"
 
 

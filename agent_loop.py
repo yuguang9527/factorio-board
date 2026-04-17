@@ -84,15 +84,21 @@ def write_event(pipe, event: dict):
 
 
 def ensure_pipe():
-    """Open the named pipe for writing. Rust client must already be reading."""
+    """Open the named pipe non-blocking. Returns None if no Rust client is reading.
+    Blocking open would hang forever until a reader attaches."""
+    print(f"🔌 Opening pipe: {PIPE_PATH}")
     try:
-        print(f"🔌 Opening pipe: {PIPE_PATH}")
-        pipe = open(PIPE_PATH, "w")
-        print("✅ Pipe connected")
-        return pipe
-    except Exception as e:
-        print(f"⚠️  Pipe failed ({e}), continuing without tracing")
+        fd = os.open(PIPE_PATH, os.O_WRONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        print("⚠️  Pipe missing — run `mkfifo` first. Continuing without tracing.")
         return None
+    except OSError as e:
+        # errno 6 (ENXIO) = no reader on the FIFO
+        print(f"⚠️  No pipe reader ({e}). Continuing without Weave tracing.")
+        return None
+    pipe = os.fdopen(fd, "w")
+    print("✅ Pipe connected")
+    return pipe
 
 
 def take_screenshot(rcon: RCONClient, session_id: str, step: int) -> str | None:
@@ -187,13 +193,14 @@ def main():
     time.sleep(0.1)
     rcon.send_command("/sc game.tick")
 
-    # Check player connected
+    # Report player connection state (headless OK — cheat mode bypasses player)
     r = rcon.send_command('/sc rcon.print(#game.connected_players)')
-    if r and r.strip() == "0":
-        print("❌ No player connected! Start Factorio client and join the server.")
-        return
+    headless = (r and r.strip() == "0")
+    print(f"{'🎮 Headless mode (no client)' if headless else '✅ Player connected'}")
 
-    print("✅ Player connected")
+    # Bootstrap cheat mode: unlock all tech + recipes so the agent can build anything
+    from player_actions import unlock_all
+    print(f"🔓 {unlock_all(rcon)}")
 
     write_event(pipe, {
         "type": "session_init",

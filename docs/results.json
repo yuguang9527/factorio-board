@@ -147,5 +147,17 @@
     "avg_latency_ms": 15575.32,
     "error_steps": 0,
     "timestamp": "2026-04-17T22:30:31.071514Z"
+  },
+  {
+    "session_id": "agent_5a9a3ddd",
+    "model": "scripted",
+    "task": "produce_iron_plates",
+    "final_score": 0.0,
+    "total_steps": 3,
+    "total_tokens": 2622,
+    "avg_latency_ms": 0.0,
+    "error_steps": 0,
+    "agent_version": "v2-python-repl",
+    "timestamp": "2026-04-18T02:52:50.010531Z"
   }
 ]
